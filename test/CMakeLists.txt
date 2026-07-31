@@ -34,6 +34,34 @@ include_directories(
   ${PROJECT_SOURCE_DIR}/third_party/fastfeat/
   ${PROJECT_SOURCE_DIR}/third_party/aom_dsp/inc/)
 
+# libdovi / libhdr10plus-rs.
+#
+# SvtAv1UnitTests is built from $<TARGET_OBJECTS:CODEC>/$<TARGET_OBJECTS:GLOBALS>
+# rather than by linking SvtAv1Enc, so none of that target's usage requirements
+# reach it. LIBDOVI_FOUND and LIBHDR10PLUS_RS_FOUND guard trailing members of
+# SequenceControlSet (Source/Lib/Codec/sequence_control_set.h), which test TUs
+# instantiate directly (QuantAsmTest.cc, quantize_func_test.cc) -- without these
+# defines those TUs would compute a smaller sizeof() than the object code they
+# link against. The link flags are needed too, because the GLOBALS objects
+# reference the dovi_*/hdr10plus_* symbols from enc_handle.c.
+#
+# SvtAv1ApiTests and SvtAv1E2ETests link the SvtAv1Enc target, so they already
+# inherit both through its PUBLIC usage requirements; the defines set here just
+# reach them a second time via directory scope, which is harmless.
+set(TEST_EXT_LIB_LIST "")
+if(LIBDOVI_FOUND)
+  add_compile_definitions(LIBDOVI_FOUND=1)
+  include_directories(${LIBDOVI_INCLUDE_DIR})
+  link_directories(${LIBDOVI_LIBRARY_DIR})
+  list(APPEND TEST_EXT_LIB_LIST ${LIBDOVI_LIBRARY})
+endif()
+if(LIBHDR10PLUS_RS_FOUND)
+  add_compile_definitions(LIBHDR10PLUS_RS_FOUND=1)
+  include_directories(${LIBHDR10PLUS_RS_INCLUDE_DIR})
+  link_directories(${LIBHDR10PLUS_RS_LIBRARY_DIR})
+  list(APPEND TEST_EXT_LIB_LIST ${LIBHDR10PLUS_RS_LIBRARY})
+endif()
+
 # Define helper functions and macros used by Google Test.
 include(../third_party/googletest/cmake/internal_utils.cmake)
 
@@ -187,7 +215,8 @@ endif()
 set(all_files ${arch_neutral_files} ${multi_arch_files} ${x86_arch_files}
               ${arm_arch_files})
 
-set(lib_list ${arch_neutral_lib_list} ${x86_arch_lib_list} ${arm_arch_lib_list})
+set(lib_list ${arch_neutral_lib_list} ${x86_arch_lib_list} ${arm_arch_lib_list}
+             ${TEST_EXT_LIB_LIST})
 
 if(UNIX)
   # App Source Files

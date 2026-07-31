@@ -33,6 +33,139 @@ if(CMAKE_GENERATOR STREQUAL "Xcode")
     target_sources(SvtAv1Enc PRIVATE ${PROJECT_BINARY_DIR}/dummy.c)
 endif()
 
+# External optional dependencies (libdovi / libhdr10plus-rs).
+#
+# This block MUST stay above the add_subdirectory() calls below. LIBDOVI_FOUND
+# and LIBHDR10PLUS_RS_FOUND guard members of SequenceControlSet
+# (Codec/sequence_control_set.h), the "dovi"/"hdr10plus-json" option parsing in
+# Globals/enc_settings.c and the RPU/JSON handling in Globals/enc_handle.c.
+# Those sources are compiled into the CODEC/GLOBALS OBJECT libraries, which are
+# consumed through $<TARGET_OBJECTS:...> and therefore inherit *nothing* from
+# SvtAv1Enc's usage requirements. Setting the macro and the include dir at
+# directory scope (add_compile_definitions/include_directories) is what reaches
+# them; the target_* calls keep both on SvtAv1Enc itself and propagate to
+# consumers such as SvtAv1EncApp.
+#
+# Scope caveat: directory scope covers this directory and the subdirectories
+# added below, i.e. every object library under Source/Lib. It does NOT reach
+# third_party/fastfeat (FASTFEAT) or test/, which are added from the top-level
+# CMakeLists. Neither currently includes sequence_control_set.h from a TU that
+# matters -- but because these macros change sizeof(SequenceControlSet), any
+# future TU outside Source/Lib that includes that header must be given the same
+# definitions or it will disagree about the struct's size.
+find_package(PkgConfig)
+if(NOT PkgConfig_FOUND)
+  message(WARNING "PkgConfig not found; disabled building with dovi & hdr10plus.")
+endif()
+
+option(EXT_LIB_STATIC "Force linking with static libraries for external dependencies" OFF)
+set(SUFFIX "")
+if(EXT_LIB_STATIC)
+  set(SUFFIX ${CMAKE_STATIC_LIBRARY_SUFFIX})
+else()
+  set(SUFFIX ${CMAKE_SHARED_LIBRARY_SUFFIX})
+endif()
+
+# libdovi detection & preprocessor macro
+option(LIBDOVI_FOUND "Use the dovi library" OFF)
+if(LIBDOVI_FOUND)
+  if(PKG_CONFIG_FOUND)
+    pkg_check_modules(PC_LIBDOVI dovi REQUIRED)
+  endif()
+  set(LIBDOVI_LIBRARY_DIR ${PC_LIBDOVI_LIBDIR})
+  set(LIBDOVI_INCLUDE_DIR ${PC_LIBDOVI_INCLUDEDIR})
+
+  include_directories(${LIBDOVI_INCLUDE_DIR})
+  target_include_directories(SvtAv1Enc PRIVATE ${LIBDOVI_INCLUDE_DIR})
+
+  if(EXT_LIB_STATIC OR MSVC)
+    set(LIBDOVI_REQUIRED_LIBRARIES ${PC_LIBDOVI_STATIC_LIBRARIES})
+  else()
+    set(LIBDOVI_REQUIRED_LIBRARIES ${PC_LIBDOVI_LIBRARIES})
+  endif()
+
+  set(LIBDOVI_LIBRARY "")
+  if(WIN32 AND NOT MSVC AND CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT MINGW)
+    # link hack only for native windows and clang
+    # because cmake pass .lib file for windows
+    # but cargo-c produce .dll.lib for shared
+    # and .lib for static library this force passing
+    # .dll extension by creating linker flags
+    foreach(BASE ${LIBDOVI_REQUIRED_LIBRARIES})
+      list(APPEND LIBDOVI_LIBRARY "-l${BASE}${SUFFIX}")
+    endforeach()
+  else()
+    foreach(BASE ${LIBDOVI_REQUIRED_LIBRARIES})
+      list(APPEND LIBDOVI_LIBRARY "${BASE}${SUFFIX}")
+    endforeach()
+  endif()
+
+  # Republish to the cache so sibling directory trees can reuse them. test/
+  # builds SvtAv1UnitTests straight from $<TARGET_OBJECTS:GLOBALS> instead of
+  # linking SvtAv1Enc, so it has to repeat the define and the link itself.
+  set(LIBDOVI_INCLUDE_DIR "${LIBDOVI_INCLUDE_DIR}" CACHE INTERNAL "libdovi include dir")
+  set(LIBDOVI_LIBRARY_DIR "${LIBDOVI_LIBRARY_DIR}" CACHE INTERNAL "libdovi library dir")
+  set(LIBDOVI_LIBRARY "${LIBDOVI_LIBRARY}" CACHE INTERNAL "libdovi link libraries")
+
+  add_compile_definitions(LIBDOVI_FOUND=1)
+  target_compile_definitions(SvtAv1Enc PUBLIC LIBDOVI_FOUND=1)
+  list(APPEND PC_REQUIRES_PRIVATE "dovi")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E echo_append "-- Building with dovi support - Yes\n")
+else()
+  execute_process(COMMAND ${CMAKE_COMMAND} -E echo_append "-- Building with dovi support - No\n")
+endif()
+
+# libhdr10plus detection & preprocessor macro
+option(LIBHDR10PLUS_RS_FOUND "Use the hdr10plus library" OFF)
+if(LIBHDR10PLUS_RS_FOUND)
+  if(PKG_CONFIG_FOUND)
+    pkg_check_modules(PC_LIBHDR10PLUS_RS hdr10plus-rs REQUIRED)
+  endif()
+  set(LIBHDR10PLUS_RS_LIBRARY_DIR ${PC_LIBHDR10PLUS_RS_LIBDIR})
+  set(LIBHDR10PLUS_RS_INCLUDE_DIR ${PC_LIBHDR10PLUS_RS_INCLUDEDIR})
+
+  include_directories(${LIBHDR10PLUS_RS_INCLUDE_DIR})
+  target_include_directories(SvtAv1Enc PRIVATE ${LIBHDR10PLUS_RS_INCLUDE_DIR})
+
+  if(EXT_LIB_STATIC OR MSVC)
+    set(LIBHDR10PLUS_RS_REQUIRED_LIBRARIES ${PC_LIBHDR10PLUS_RS_STATIC_LIBRARIES})
+  else()
+    set(LIBHDR10PLUS_RS_REQUIRED_LIBRARIES ${PC_LIBHDR10PLUS_RS_LIBRARIES})
+  endif()
+
+  set(LIBHDR10PLUS_RS_LIBRARY "")
+  if(WIN32 AND NOT MSVC AND CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT MINGW)
+    # link hack only for native windows and clang
+    # because cmake pass .lib file for windows
+    # on both static and shared library
+    # but cargo-c produce .dll.lib for shared
+    # and .lib for static library this force passing
+    # .dll extension by creating linker flags
+    if(NOT EXT_LIB_STATIC)
+      message(WARNING "Shared version of hdr10plus-rs library is known to cause error when link")
+    endif()
+    foreach(BASE ${LIBHDR10PLUS_RS_REQUIRED_LIBRARIES})
+      list(APPEND LIBHDR10PLUS_RS_LIBRARY "-l${BASE}${SUFFIX}")
+    endforeach()
+  else()
+    foreach(BASE ${LIBHDR10PLUS_RS_REQUIRED_LIBRARIES})
+      list(APPEND LIBHDR10PLUS_RS_LIBRARY "${BASE}${SUFFIX}")
+    endforeach()
+  endif()
+
+  # See the note in the libdovi block above.
+  set(LIBHDR10PLUS_RS_INCLUDE_DIR "${LIBHDR10PLUS_RS_INCLUDE_DIR}" CACHE INTERNAL "libhdr10plus-rs include dir")
+  set(LIBHDR10PLUS_RS_LIBRARY_DIR "${LIBHDR10PLUS_RS_LIBRARY_DIR}" CACHE INTERNAL "libhdr10plus-rs library dir")
+  set(LIBHDR10PLUS_RS_LIBRARY "${LIBHDR10PLUS_RS_LIBRARY}" CACHE INTERNAL "libhdr10plus-rs link libraries")
+
+  add_compile_definitions(LIBHDR10PLUS_RS_FOUND=1)
+  target_compile_definitions(SvtAv1Enc PUBLIC LIBHDR10PLUS_RS_FOUND=1)
+  list(APPEND PC_REQUIRES_PRIVATE "hdr10plus-rs")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E echo_append "-- Building with hdr10plus support - Yes\n")
+else()
+  execute_process(COMMAND ${CMAKE_COMMAND} -E echo_append "-- Building with hdr10plus support - No\n")
+endif()
+
 add_subdirectory(C_DEFAULT)
 add_subdirectory(Codec)
 add_subdirectory(Globals)
@@ -120,103 +253,6 @@ set_target_properties(SvtAv1Enc PROPERTIES VERSION ${PROJECT_VERSION})
 set_target_properties(SvtAv1Enc PROPERTIES SOVERSION ${PROJECT_VERSION_MAJOR})
 set_target_properties(SvtAv1Enc PROPERTIES C_VISIBILITY_PRESET hidden)
 set_target_properties(SvtAv1Enc PROPERTIES EXPORT_NAME ${SVT_AV1_TARGET})
-
-find_package(PkgConfig)
-if(NOT PkgConfig_FOUND)
-  message(WARNING "PkgConfig not found; disabled building with dovi & hdr10plus.")
-endif()
-
-option(EXT_LIB_STATIC "Force linking with static libraries for external dependencies" OFF)
-set(SUFFIX "")
-if(EXT_LIB_STATIC)
-  set(SUFFIX ${CMAKE_STATIC_LIBRARY_SUFFIX})
-else()
-  set(SUFFIX ${CMAKE_SHARED_LIBRARY_SUFFIX})
-endif()
-
-# libdovi detection & preprocessor macro
-option(LIBDOVI_FOUND "Use the dovi library" OFF)
-if(LIBDOVI_FOUND)
-  if(PKG_CONFIG_FOUND)
-    pkg_check_modules(PC_LIBDOVI dovi REQUIRED)
-  endif()
-  set(LIBDOVI_LIBRARY_DIR ${PC_LIBDOVI_LIBDIR})
-  set(LIBDOVI_INCLUDE_DIR ${PC_LIBDOVI_INCLUDEDIR})
-
-  target_include_directories(SvtAv1Enc PRIVATE ${LIBDOVI_INCLUDE_DIR})
-
-  if(EXT_LIB_STATIC OR MSVC)
-    set(LIBDOVI_REQUIRED_LIBRARIES ${PC_LIBDOVI_STATIC_LIBRARIES})
-  else()
-    set(LIBDOVI_REQUIRED_LIBRARIES ${PC_LIBDOVI_LIBRARIES})
-  endif()
-
-  set(LIBDOVI_LIBRARY "")
-  if(WIN32 AND NOT MSVC AND CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT MINGW)
-    # link hack only for native windows and clang
-    # because cmake pass .lib file for windows
-    # but cargo-c produce .dll.lib for shared
-    # and .lib for static library this force passing
-    # .dll extension by creating linker flags
-    foreach(BASE ${LIBDOVI_REQUIRED_LIBRARIES})
-      list(APPEND LIBDOVI_LIBRARY "-l${BASE}${SUFFIX}")
-    endforeach()
-  else()
-    foreach(BASE ${LIBDOVI_REQUIRED_LIBRARIES})
-      list(APPEND LIBDOVI_LIBRARY "${BASE}${SUFFIX}")
-    endforeach()
-  endif()
-
-  target_compile_definitions(SvtAv1Enc PUBLIC LIBDOVI_FOUND=1)
-  list(APPEND PC_REQUIRES_PRIVATE "dovi")
-  execute_process(COMMAND ${CMAKE_COMMAND} -E echo_append "-- Building with dovi support - Yes\n")
-else()
-  execute_process(COMMAND ${CMAKE_COMMAND} -E echo_append "-- Building with dovi support - No\n")
-endif()
-
-# libhdr10plus detection & preprocessor macro
-option(LIBHDR10PLUS_RS_FOUND "Use the hdr10plus library" OFF)
-if(LIBHDR10PLUS_RS_FOUND)
-  if(PKG_CONFIG_FOUND)
-    pkg_check_modules(PC_LIBHDR10PLUS_RS hdr10plus-rs REQUIRED)
-  endif()
-  set(LIBHDR10PLUS_RS_LIBRARY_DIR ${PC_LIBHDR10PLUS_RS_LIBDIR})
-  set(LIBHDR10PLUS_RS_INCLUDE_DIR ${PC_LIBHDR10PLUS_RS_INCLUDEDIR})
-
-  target_include_directories(SvtAv1Enc PRIVATE ${LIBHDR10PLUS_RS_INCLUDE_DIR})
-
-  if(EXT_LIB_STATIC OR MSVC)
-    set(LIBHDR10PLUS_RS_REQUIRED_LIBRARIES ${PC_LIBHDR10PLUS_RS_STATIC_LIBRARIES})
-  else()
-    set(LIBHDR10PLUS_RS_REQUIRED_LIBRARIES ${PC_LIBHDR10PLUS_RS_LIBRARIES})
-  endif()
-
-  set(LIBHDR10PLUS_RS_LIBRARY "")
-  if(WIN32 AND NOT MSVC AND CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT MINGW)
-    # link hack only for native windows and clang
-    # because cmake pass .lib file for windows
-    # on both static and shared library
-    # but cargo-c produce .dll.lib for shared
-    # and .lib for static library this force passing
-    # .dll extension by creating linker flags
-    if(NOT EXT_LIB_STATIC)
-      message(WARNING "Shared version of hdr10plus-rs library is known to cause error when link")
-    endif()
-    foreach(BASE ${LIBHDR10PLUS_RS_REQUIRED_LIBRARIES})
-      list(APPEND LIBHDR10PLUS_RS_LIBRARY "-l${BASE}${SUFFIX}")
-    endforeach()
-  else()
-    foreach(BASE ${LIBHDR10PLUS_RS_REQUIRED_LIBRARIES})
-      list(APPEND LIBHDR10PLUS_RS_LIBRARY "${BASE}${SUFFIX}")
-    endforeach()
-  endif()
-
-  target_compile_definitions(SvtAv1Enc PUBLIC LIBHDR10PLUS_RS_FOUND=1)
-  list(APPEND PC_REQUIRES_PRIVATE "hdr10plus-rs")
-  execute_process(COMMAND ${CMAKE_COMMAND} -E echo_append "-- Building with hdr10plus support - Yes\n")
-else()
-  execute_process(COMMAND ${CMAKE_COMMAND} -E echo_append "-- Building with hdr10plus support - No\n")
-endif()
 
 target_link_libraries(SvtAv1Enc PUBLIC  "$<BUILD_INTERFACE:${PLATFORM_LIBS}>"
                                 PRIVATE "$<INSTALL_INTERFACE:${PLATFORM_LIBS}>"
